@@ -120,6 +120,47 @@ def verify_signature(payload, signature):
 
 def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user):
     """Process a new pull request by sending it to Claude for review"""
+    # First check if PR is auto-mergeable
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    pr_detail_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}"
+    
+    print(f"Checking if PR #{pr_number} is auto-mergeable...")
+    pr_response = requests.get(pr_detail_url, headers=headers)
+    
+    if pr_response.status_code == 200:
+        pr_data = pr_response.json()
+        mergeable = pr_data.get('mergeable')
+        mergeable_state = pr_data.get('mergeable_state')
+        
+        print(f"PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
+        
+        # GitHub might not have computed mergeable status yet (null)
+        if mergeable is None and mergeable_state == 'unknown':
+            print("Mergeable status not computed yet, waiting 3 seconds and trying again...")
+            import time
+            time.sleep(3)
+            
+            # Try again
+            pr_response = requests.get(pr_detail_url, headers=headers)
+            if pr_response.status_code == 200:
+                pr_data = pr_response.json()
+                mergeable = pr_data.get('mergeable')
+                mergeable_state = pr_data.get('mergeable_state')
+                print(f"After retry - PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
+        
+        # If GitHub explicitly says it's not mergeable
+        if mergeable is False:
+            rejection_message = """This pull request cannot be automatically merged due to conflicts with the base branch.
+
+Please resolve the merge conflicts and reopen your pull request.
+
+Note: This automatic rejection happens before content review. Once conflicts are resolved, feel free to reopen the PR for a full review.
+"""
+            print(f"Automatically rejecting PR #{pr_number} due to merge conflicts")
+            reject_pull_request(pr_number, rejection_message)
+            return
+    
+    # Continue with normal processing if PR is mergeable or we couldn't determine
     # Get PR details including changed files
     changes, file_sizes = get_pr_changes(pr_number)
     
