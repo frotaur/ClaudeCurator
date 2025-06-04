@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import hmac
+import time
 import hashlib
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
@@ -23,22 +24,15 @@ REPO_NAME = os.environ.get("REPO_NAME")
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # System prompt for Claude - more efficient as system prompts don't count toward token usage
-SYSTEM_PROMPT = """You are the curator of a GitHub repository. Your job is to review pull requests and decide if they should be accepted or rejected based on the repository guidelines.
+system_prompt_file = Path("system_prompt.txt")
+SYSTEM_PROMPT = None
 
-Your tasks for each PR:
-1. Review if the contribution complies with the repository guidelines, contained in guidelines.md
-2. Decide whether to accept or reject the pull request
-3. Provide an explanation for your decision
-
-
-Format your response exactly as follows:
-
-DECISION: [ACCEPT/REJECT]
-
-EXPLANATION:
-[Your detailed explanation here]
-
-Your tone should be friendly but firm. Remember that the guidelines are the source of truth for what belongs in this repository."""
+if system_prompt_file.exists():
+    with system_prompt_file.open("r") as f:
+        SYSTEM_PROMPT = f.read().strip()
+else:
+    print("⚠️ WARNING: system_prompt.txt not found!")
+    raise FileNotFoundError("Please create a system_prompt.txt file with the system prompt for Claude.")
 
 @curator_app.route('/webhook', methods=['POST'])
 def github_webhook():
@@ -75,15 +69,17 @@ def github_webhook():
     if event == 'pull_request' and (payload['action'] == 'opened' or payload['action'] == 'reopened'):
         print('RECEIVED PR OPENED EVENT')
         pr_number = payload['pull_request']['number']
-        pr_url = payload['pull_request']['html_url']
         pr_title = payload['pull_request']['title']
         pr_body = payload['pull_request']['body'] or ""
         pr_user = payload['pull_request']['user']['login']
         
         # Process the pull request
-        process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user, log=True)
-        
+        process_pull_request(pr_number, pr_title, pr_body, pr_user, log=True)
+
         return jsonify({"status": "Processing PR"}), 200
+    
+    print(f"Received event: {event} with action: {payload.get('action', 'unknown')}")
+    print("This event is not handled by the curator.")
     
     return jsonify({"status": "Event ignored"}), 200
 
@@ -118,13 +114,14 @@ def verify_signature(payload, signature):
         print(f"Error verifying signature: {e}")
         return False
 
-def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user, log=False):
+def process_pull_request(pr_number, pr_title, pr_body, pr_user, log=False):
     """Process a new pull request by sending it to Claude for review"""
     # First check if PR is auto-mergeable
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     pr_detail_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}"
     
     print(f"Checking if PR #{pr_number} is auto-mergeable...")
+    time.sleep(1) # Small delay to help github figure out if the PR is mergeable
     pr_response = requests.get(pr_detail_url, headers=headers)
     
     if pr_response.status_code == 200:
@@ -137,7 +134,6 @@ def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user, log=Fals
         # GitHub might not have computed mergeable status yet (null)
         if mergeable is None and mergeable_state == 'unknown':
             print("Mergeable status not computed yet, waiting 5 seconds and trying again...")
-            import time
             time.sleep(5)
             
             # Try again
@@ -209,12 +205,16 @@ Please review this pull request and decide if it should be accepted or rejected.
         messages=[
             {"role": "user", 
              "content": user_prompt_content
-            }
-
+            },
+            {"role": "assistant", "content": "{"}
         ]
     )
-    
-    claude_response = response.content[0].text
+
+    try:
+        claude_response = json.loads("{"+response.content[0].text)
+    except json.JSONDecodeError:
+        print("❌ Error decoding Claude's response - falling back to raw text")
+        claude_response = {'decision':False,'explanation': f'Curator failed to return parsable JSON, auto-rejected : {response.content[0].text}'}
 
     if(log):
         filepath = Path("logs.txt")
@@ -234,17 +234,14 @@ Please review this pull request and decide if it should be accepted or rejected.
 
     print(f"Claude's response: {claude_response}")
     # Parse Claude's decision
-    lines = claude_response.split("\n")
-    decision_line = next((line for line in lines if line.startswith("DECISION:")), "")
-    decision = "ACCEPT" in decision_line
-    
-    # Extract explanation (everything after "EXPLANATION:")
-    explanation_start = claude_response.find("EXPLANATION:")
-    explanation = claude_response[explanation_start + 12:].strip() if explanation_start != -1 else "No explanation provided."
-    
+    decision = claude_response.get('decision', False)
+    explanation = claude_response.get('explanation', 'No explanation provided.')
+
     # Take action on GitHub
     if decision:
-        approve_pull_request(pr_number, explanation)
+        commit_title = claude_response.get('commit_title', None)
+        commit_message = claude_response.get('commit_message', None)
+        approve_pull_request(pr_number, explanation, commit_title, commit_message)
     else:
         reject_pull_request(pr_number, explanation)
 
@@ -269,16 +266,19 @@ def build_image_prompt(images_dictionary):
 
 def get_repository_guidelines():
     """Fetch the current repository guidelines"""
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/guidelines.md"
+    url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/guidelines.md"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     
+    guideline_error = "Unable to fetch guidelines. They might have been deleted, or corrupted. Operate as if they are empty."
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
-        content = response.json()['content']
-        import base64
-        return base64.b64decode(content).decode('utf-8')
+        try:
+            return response.content.decode('utf-8')
+        except Exception as e:
+            print(f"⚠️ WARNING: Failed to decode guidelines.md - {e}")
+            return guideline_error
     else:
-        return "Unable to fetch guidelines."
+        return guideline_error
 
 def format_file_size(size_in_bytes):
     """Helper function to format file size in human-readable format"""
@@ -364,7 +364,7 @@ def get_pr_changes(pr_number, only_diffs=True):
     
     return "\n\n".join(changes_text), changes_images, file_sizes
 
-def approve_pull_request(pr_number, explanation):
+def approve_pull_request(pr_number, explanation, commit_title=None, commit_message=None):
     """Approve the pull request"""
     # Add comment
     comment_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/issues/{pr_number}/comments"
@@ -373,14 +373,12 @@ def approve_pull_request(pr_number, explanation):
         "body": f"✅ **PR Approved by AI Curator** ✅\n\n{explanation}"
     }
     requests.post(comment_url, headers=headers, json=comment_data)
-    print('BIM')
     # Try to approve the PR (might fail if it's your own PR)
     review_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/reviews"
     review_data = {
         "event": "APPROVE",
         "body": "Automatically approved by AI Curator"
     }
-    print('BAM')
     approve_response = requests.post(review_url, headers=headers, json=review_data)
     
     is_self_approval_error = False
@@ -402,13 +400,12 @@ def approve_pull_request(pr_number, explanation):
     if not is_self_approval_error and approve_response.status_code != 200:
         print("⚠️ Approval failed with an unexpected error - merge may also fail")
     
-    print('BOP')
     
     # Merge the PR
     merge_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/merge"
     merge_data = {
-        "commit_title": f"Merge PR #{pr_number}",
-        "commit_message": "Automatically merged by AI Curator",
+        "commit_title": commit_title or f"Merge PR #{pr_number}: {pr_title}",
+        "commit_message": commit_message or f"Automatically merged PR #{pr_number} by AI Curator",
         "merge_method": "merge"
     }
     print(f"Attempting to merge PR #{pr_number}...")
