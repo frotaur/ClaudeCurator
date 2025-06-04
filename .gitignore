@@ -1,6 +1,6 @@
 # Environment variables
 .env
-
+logs.txt
 # Python
 __pycache__/
 *.py[cod]

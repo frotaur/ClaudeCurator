@@ -6,7 +6,7 @@ import hashlib
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
 from dotenv import load_dotenv
-
+from pathlib import Path
 # Load environment variables from .env file
 load_dotenv()
 
@@ -81,7 +81,7 @@ def github_webhook():
         pr_user = payload['pull_request']['user']['login']
         
         # Process the pull request
-        process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user)
+        process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user, log=True)
         
         return jsonify({"status": "Processing PR"}), 200
     
@@ -118,7 +118,7 @@ def verify_signature(payload, signature):
         print(f"Error verifying signature: {e}")
         return False
 
-def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user):
+def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user, log=False):
     """Process a new pull request by sending it to Claude for review"""
     # First check if PR is auto-mergeable
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
@@ -136,9 +136,9 @@ def process_pull_request(pr_number, pr_url, pr_title, pr_body, pr_user):
         
         # GitHub might not have computed mergeable status yet (null)
         if mergeable is None and mergeable_state == 'unknown':
-            print("Mergeable status not computed yet, waiting 3 seconds and trying again...")
+            print("Mergeable status not computed yet, waiting 5 seconds and trying again...")
             import time
-            time.sleep(3)
+            time.sleep(5)
             
             # Try again
             pr_response = requests.get(pr_detail_url, headers=headers)
@@ -162,7 +162,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
     
     # Continue with normal processing if PR is mergeable or we couldn't determine
     # Get PR details including changed files
-    changes, file_sizes = get_pr_changes(pr_number)
+    text_changes, image_changes, file_sizes = get_pr_changes(pr_number)
     
     # Check if any files are over the size limit (2MB = 2*1024*1024 bytes)
     MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB in bytes
@@ -181,31 +181,57 @@ Note: This automatic rejection happens before content review. Once conflicts are
     guidelines = get_repository_guidelines()
     
     # Build user prompt for Claude - contains the specific PR details
-    user_prompt = f"""Repository Guidelines, contained in guidelines.md :
-{guidelines}
+    base_prompt = f"""Repository Guidelines, contained in guidelines.md :
+"{guidelines}"
 
 Pull Request Details:
-Title: {pr_title}
-Submitted by: {pr_user}
-Description: {pr_body}
-
-Changes:
-{changes}
+Title: "{pr_title}"
+Submitted by: "{pr_user}"
+Description: <description_start>\n{pr_body}\n<description_end>
 
 Please review this pull request and decide if it should be accepted or rejected."""
+    
+    changes_prompt = f"""Following are the changes made in this PR:
+<changes_start>\n{text_changes}\n<changes_end>"""
 
+    images_prompt = build_image_prompt(image_changes) if image_changes else []
+    
+    user_prompt_content = []
+    user_prompt_content.append({"type": "text", "text": base_prompt})
+    if images_prompt:
+        user_prompt_content.extend(images_prompt)
+    user_prompt_content.append({"type": "text", "text": changes_prompt})
     # Send to Claude for review using system and user prompts
     response = client.messages.create(
         model="claude-3-7-sonnet-20250219",
         max_tokens=1000,
         system=SYSTEM_PROMPT,
         messages=[
-            {"role": "user", "content": user_prompt}
+            {"role": "user", 
+             "content": user_prompt_content
+            }
+
         ]
     )
     
     claude_response = response.content[0].text
-    
+
+    if(log):
+        filepath = Path("logs.txt")
+        with filepath.open("a") as log_file:
+            log_file.write(f"\n\n Processing PR #{pr_number}:\n")
+            user_prompt = ""
+            for prompt in user_prompt_content:
+                if prompt['type'] == 'text':
+                    user_prompt += prompt['text'] + "\n\n"
+                elif prompt['type'] == 'image':
+                    user_prompt += f"Image file: {prompt['source']['url']}\n\n"
+                else:
+                    user_prompt += "Unknown content type" + "\n\n"
+            log_file.write(user_prompt + "\n\n")
+            log_file.write(f"Sending to Claude for review...\n")
+            log_file.write(f"Claude's response:\n{claude_response}\n")
+
     print(f"Claude's response: {claude_response}")
     # Parse Claude's decision
     lines = claude_response.split("\n")
@@ -221,6 +247,25 @@ Please review this pull request and decide if it should be accepted or rejected.
         approve_pull_request(pr_number, explanation)
     else:
         reject_pull_request(pr_number, explanation)
+
+def build_image_prompt(images_dictionary):
+    """
+        Build a prompt for Claude with the changed images.
+
+        Args:
+            images_dictionary (dict): A dictionary mapping image filenames to their raw URLs.
+
+        Returns:
+            list: A list of prompts for Claude, each containing an image and its filename, to be sent sequentially.
+    """
+    if not images_dictionary:
+        raise ValueError("No images found in the PR changes.")
+    prompts = []
+    for filename, raw_url in images_dictionary.items():
+        prompts.append({"type": "text", "text": f"Image file: {filename}"})
+        prompts.append({"type": "image", "source": {"type": "url","url": raw_url}})
+
+    return prompts
 
 def get_repository_guidelines():
     """Fetch the current repository guidelines"""
@@ -245,7 +290,17 @@ def format_file_size(size_in_bytes):
         return f"{size_in_bytes / (1024 * 1024):.1f} MB"
 
 def get_pr_changes(pr_number):
-    """Get the changes made in the pull request"""
+    """
+        Get the changes made in the pull request. Separates images from text-like files,
+        to be able to send them to Claude separately. For now, just reads the name of 
+        the other files and reports them with size and name.
+
+        Args:
+            pr_number (int): The pull request number to fetch changes for.
+
+        Returns:
+            str, dict, dict: text changes, changed images, and file sizes.
+    """
     # Get the list of files changed
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/files"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
@@ -254,15 +309,13 @@ def get_pr_changes(pr_number):
     files_changed = response.json()
     
     changes_text = []
+    changes_images = {} # Dictionary to track changed images
     file_sizes = {}  # Dictionary to track file sizes
     
     for file in files_changed:
         filename = file['filename']
         status = file['status']  # added, modified, removed
-        
-        if status == "removed":
-            changes_text.append(f"File {filename} was removed")
-            continue
+        file_ext = os.path.splitext(filename)[1].lower()  # Get file extension
         
         # Get file content
         if filename == "guidelines.md" and status == "modified":
@@ -271,25 +324,27 @@ def get_pr_changes(pr_number):
             changes_text.append(f"File: {filename} ({status})\n{patch}")
         else:
             # For other files, fetch the full content
-            file_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{filename}?ref=refs/pull/{pr_number}/head"
+            file_url = file['raw_url']
             file_response = requests.get(file_url, headers=headers)
             
             if file_response.status_code == 200:
                 # Store file size for size checks
-                file_size = file_response.json().get('size', 0)
+                content_type = file_response.headers.get('Content-Type', '')
+                content_length = file_response.headers.get('content-length')
+                if content_length:
+                        file_size = int(content_length)
+                else:
+                    file_size = len(file_response.content)
+                    
                 file_sizes[filename] = file_size
                 
                 # Check if it's likely a binary/image file
-                import os
-                file_ext = os.path.splitext(filename)[1].lower()
-                binary_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.zip', '.exe', 
-                                    '.bin', '.mp3', '.mp4', '.avi', '.mov', '.ico', '.bmp',
-                                    '.svg', '.tar', '.gz', '.rar', '.7z', '.iso']
+                image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg']
                 
-                if file_ext in binary_extensions:
-                    # Handle binary files - include file size
+                if file_ext in image_extensions:
                     size_str = format_file_size(file_size)
-                    changes_text.append(f"File: {filename} ({status})\n[Binary file/image - {size_str} - content not displayed]")
+                    changes_text.append(f"File: {filename} ({status})\n[Image file - {size_str}]")
+                    changes_images[filename] = file['raw_url']  # Store raw URL for images
                 else:
                     try:
                         # Try to handle as text
@@ -307,7 +362,7 @@ def get_pr_changes(pr_number):
             else:
                 changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
     
-    return "\n\n".join(changes_text), file_sizes
+    return "\n\n".join(changes_text), changes_images, file_sizes
 
 def approve_pull_request(pr_number, explanation):
     """Approve the pull request"""

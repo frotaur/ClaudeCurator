@@ -76,7 +76,8 @@ def main():
     
     webhook_url = webhook_url.rstrip("/") + "/webhook"  # Ensure the URL ends with /webhook
     # Generate a random webhook secret
-    webhook_secret = secrets.token_hex(20)
+    # webhook_secret = secrets.token_hex(20)
+    webhook_secret = 'testsecret'
     
     # Create webhook
     if create_github_webhook(github_token, repo_owner, repo_name, webhook_url, webhook_secret):
