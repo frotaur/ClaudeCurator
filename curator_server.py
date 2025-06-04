@@ -289,7 +289,7 @@ def format_file_size(size_in_bytes):
     else:
         return f"{size_in_bytes / (1024 * 1024):.1f} MB"
 
-def get_pr_changes(pr_number):
+def get_pr_changes(pr_number, only_diffs=True):
     """
         Get the changes made in the pull request. Separates images from text-like files,
         to be able to send them to Claude separately. For now, just reads the name of 
@@ -297,6 +297,7 @@ def get_pr_changes(pr_number):
 
         Args:
             pr_number (int): The pull request number to fetch changes for.
+            only_diffs (bool): If True, only displays diffs. Otherwise, displays the full changed file.
 
         Returns:
             str, dict, dict: text changes, changed images, and file sizes.
@@ -315,52 +316,51 @@ def get_pr_changes(pr_number):
     for file in files_changed:
         filename = file['filename']
         status = file['status']  # added, modified, removed
-        file_ext = os.path.splitext(filename)[1].lower()  # Get file extension
         
         # Get file content
-        if filename == "guidelines.md" and status == "modified":
-            # For guidelines, we want to show the diff
-            patch = file.get('patch', '')
-            changes_text.append(f"File: {filename} ({status})\n{patch}")
-        else:
-            # For other files, fetch the full content
-            file_url = file['raw_url']
-            file_response = requests.get(file_url, headers=headers)
-            
-            if file_response.status_code == 200:
-                # Store file size for size checks
-                content_type = file_response.headers.get('Content-Type', '')
-                content_length = file_response.headers.get('content-length')
-                if content_length:
-                        file_size = int(content_length)
-                else:
-                    file_size = len(file_response.content)
-                    
-                file_sizes[filename] = file_size
-                
-                # Check if it's likely a binary/image file
-                image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg']
-                
-                if file_ext in image_extensions:
-                    size_str = format_file_size(file_size)
-                    changes_text.append(f"File: {filename} ({status})\n[Image file - {size_str}]")
-                    changes_images[filename] = file['raw_url']  # Store raw URL for images
-                else:
-                    try:
-                        # Try to handle as text
-                        content = file_response.json()['content']
-                        import base64
-                        file_content = base64.b64decode(content).decode('utf-8')
-                        changes_text.append(f"File: {filename} ({status})\n```\n{file_content}\n```")
-                    except UnicodeDecodeError:
-                        # If decoding fails, it's probably binary even if not on our list
-                        size_str = format_file_size(file_size)
-                        changes_text.append(f"File: {filename} ({status})\n[Binary file - {size_str} - content not displayed]")
-                    except Exception as e:
-                        # Handle any other errors
-                        changes_text.append(f"File: {filename} ({status})\nError reading file: {str(e)}")
+        file_url = file['raw_url']
+        file_response = requests.get(file_url, headers=headers)
+        
+        if file_response.status_code == 200:
+            # Store file size for size checks
+            content_type = file_response.headers.get('Content-Type', '')
+            content_length = file_response.headers.get('content-length')
+            if content_length:
+                    file_size = int(content_length)
             else:
-                changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
+                file_size = len(file_response.content)
+                
+            file_sizes[filename] = file_size
+            
+            if(status == 'renamed' or status == 'copied'):
+                # If it has been renamed or copied, mention the previous filename
+                # then continue as usual
+                previous_filename = file.get('previous_filename', 'unknown')
+                changes_text.append(f"File: {previous_filename} -> {filename} ({status})")
+            
+            if content_type.startswith('image/'):
+                size_str = format_file_size(file_size)
+                changes_text.append(f"File: {filename} ({status})\n[Image file - {size_str}]")
+                changes_images[filename] = file['raw_url']  # Store raw URL for images
+            else:
+                # Try to decode as text, too many MIME types to check
+                try:
+                    content = file_response.content.decode('utf-8')
+                    if('patch' in file):
+                        # If the file has a patch, include the changes
+                        change_string = f"File: {filename} ({status})\n Changes made : ```\n{file.get('patch','')}\n```"
+                        if(not only_diffs):
+                            change_string += f"\n\nFull content:\n```{content}```"
+                    changes_text.append(change_string)
+                except UnicodeDecodeError:
+                    # If decoding fails, it's probably binary even if not on our list
+                    size_str = format_file_size(file_size)
+                    changes_text.append(f"File: {filename} ({status})\n[Binary file - {size_str} - content not displayed]")
+                except Exception as e:
+                    # Handle any other errors
+                    changes_text.append(f"File: {filename} ({status})\nError reading file: {str(e)}")
+        else:
+            changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
     
     return "\n\n".join(changes_text), changes_images, file_sizes
 
