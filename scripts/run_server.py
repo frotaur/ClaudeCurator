@@ -1,3 +1,8 @@
+"""
+    Scripts that run the claude curator server, using the config provided in the .env file.
+    The github webhook must have been created. By default, logs are saved in the current directory, in 'curator_server_logs.txt'.
+"""
+
 import os
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv

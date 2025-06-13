@@ -1,65 +1,83 @@
 # Claude Curator
 
-A GitHub repository curator powered by Claude AI that automatically reviews and manages pull requests based on the repository guidelines.
+A simple repository curator, that queries Claude to decide whether to merge or not incoming PR's, given a 'guidelines.md' file.
 
-## How It Works
+This has obviously much less capability than other AI agent that can contribute/maintain repositories, and uses nothing fancy like MCP and agentic capabilities. The difference (and main idea) with this project, is that the 'guidelines.md' file is itself contained in the repository that is being maintained. As such, it may generate interesting situations, as you can gaslight the curator to change its own guidelines... My hope is that it can produce some interesting interactions with people trying to hack/protect the guidelines. As such, the limited context the curator has to work with to accept/refuse PRs can be considered a feature!
 
-1. When a pull request is opened, GitHub sends a webhook notification to this application
-2. The application fetches the PR details and contents
-3. Claude AI reviews the PR against the repository guidelines
-4. Based on Claude's decision, the PR is either:
-   - Approved and merged with an explanatory comment
-   - Rejected with an explanatory comment and closed
+## Quick Start
 
-## Setup Instructions
+1. **Install dependencies:**
+Using pip, for example :
+```bash
+pip install -e .
+```
 
-### Prerequisites
+This will install the package, and install two scripts `run-server` and `deploy-webhook`.
 
-- GitHub repository
-- GitHub personal access token with repo permissions
-- Anthropic API key
+2. **Set up environment variables:**
+For a guided setup of the necessary environment variables, run :
+```bash
+deploy-webhook
+```
+This will prompt you to give the require variables, and then setup the github webhook to allow the curator to run.
 
-### Environment Variables
-
-Create a `.env` file with the following variables:
+You can also do this manually. First, create a `.env` file with:
 
 ```
-GITHUB_TOKEN=your_github_token
+GITHUB_TOKEN=your_github_personal_access_token
 ANTHROPIC_API_KEY=your_anthropic_api_key
+REPO_NAME=curated_repository_name
+REPO_OWNER=username_of_owner_of_curated_repository
 GITHUB_SECRET=your_webhook_secret
-REPO_OWNER=github_username
-REPO_NAME=repository_name
+WEBHOOK_URL=public_url_where_the_server_is_exposed
+PORT=port_where_curator_server_will_run
 ```
 
-### Installation
+3. **Create repository guidelines:**
+Add a `guidelines.md` file to your repository's main branch with your contribution rules. We provide and example `example_guidelines.md`, but feel free to make it as you like!
 
-1. Clone this repository
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Run the application:
-   ```
-   python app.py
+4. **Deploy webhook (optional helper):**
+Either deploy the webhook with the provided script, or you can deploy manually on the repository settings on github. Note that for the deploy-webhook script to work, the provided `GITHUB_TOKEN` needs to have the correct privilegies.
+   ```bash
+   deploy-webhook --url https://your-server.com/webhook
    ```
 
-### Setting Up GitHub Webhook
+5. **Run the server:**
+```bash
+run-server --log-dir ./logs --print-log  # Custom log directory and console output
+```
 
-1. Go to your repository's Settings > Webhooks
-2. Add a new webhook:
-   - Payload URL: Your server's URL (e.g., `https://your-server.com/webhook`)
-   - Content type: `application/json`
-   - Secret: Same as GITHUB_SECRET
-   - Events: Select "Pull requests"
+This will start the curator server, that will handle the PR when it receives webhook events. Note that the server is run locally, so it is your job to expose it to the internet in whichever way you prefer to connect it to github. You can use `ngrok`, for example.
 
-## Deployment
+The optional parameters provide a folder where to store the server logs (provide `''` to not save logs), and if the second one is included the logs will also be printed on the console.
 
-This application can be deployed on:
-- Heroku
-- AWS Lambda + API Gateway
-- Google Cloud Run
-- Any server with Python installed
+NOTE : run-server runs the server in 'development mode'. I am working to see if it's easy to provide a scripts that directly runs it in 'production mode'. Since the `run_server.py` script is very simple, feel free to re-implement it whichever way you prefer.
+
+## How the Curator Works
+- Listens for GitHub webhook events on `/webhook` endpoint
+- Only does something if it receives as 'PR opened' or 'PR reopened' event.
+- Fetches PR content and repository guidelines
+- Uses Claude to review PRs against your guidelines
+- Note that the review is not 'agentic', Claude can access only the content of the PR.
+- Automatically approves and merges PRs or rejects non-compliant ones, with a nice explanation
+- Handles both images and text, but not more.
+
+Note that the PR reviews/merges will come from the user who owns the provided `GITHUB_TOKEN`. Ideally, I would make it a github app, and I'll consider this in the future.
+
+### Webhook Setup
+
+Either use the helper script or manually create a webhook:
+- URL: `https://your-server.com/webhook`
+- Content type: `application/json`
+- Secret: Same as `GITHUB_SECRET`
+- Events: Pull requests
+
+## Repository Structure
+
+- `src/curator_server/`: Server logic
+- `scripts/`: CLI tools for running the server and deploying the webhook
+- `example_guidelines.md`: Example repository guidelines
+- The system prompt which is used is located in `src/curator_server/system_prompt.txt`. This could be changed, but it is entangled with how the server works. However, if you want to include some guidelines that can't be changed, it should be done in the system prompt.
 
 ## License
-
 MIT
