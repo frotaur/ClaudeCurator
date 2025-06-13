@@ -51,7 +51,11 @@ This will start the curator server, that will handle the PR when it receives web
 
 The optional parameters provide a folder where to store the server logs (provide `''` to not save logs), and if the second one is included the logs will also be printed on the console.
 
-NOTE : run-server runs the server in 'development mode'. I am working to see if it's easy to provide a scripts that directly runs it in 'production mode'. Since the `run_server.py` script is very simple, feel free to re-implement it whichever way you prefer.
+`run-server` runs the server in 'development mode'. To run it in 'production mode' (whatever that changes, I really have no idea beyond several workers, but here we use anyway one worker because the PR should be sequential, anyway) with gunicorn, you can instead do :
+
+```bash
+run-gunicorn --log-dir ./logs --print-log # Custom log directory and console output
+```
 
 ## How the Curator Works
 - Listens for GitHub webhook events on `/webhook` endpoint

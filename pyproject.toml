@@ -11,13 +11,14 @@ requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.54.0",
     "flask>=3.1.1",
+    "gunicorn>=23.0.0",
     "python-dotenv>=1.1.0",
     "requests>=2.32.4",
 ]
 
 [project.scripts]
 run-server = "scripts.run_server:main"
-deploy-webhook = "scripts.deploy_webhook:main"  # New script entry
-
+deploy-webhook = "scripts.deploy_webhook:main" 
+run-gunicorn = "scripts.run_gunicorn:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/curator_server","scripts"]
