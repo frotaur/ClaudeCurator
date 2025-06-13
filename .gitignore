@@ -1,6 +1,7 @@
 # Environment variables
 .env
 logs.txt
+
 # Python
 __pycache__/
 *.py[cod]
@@ -25,14 +26,11 @@ wheels/
 *.egg
 
 # Virtual Environment
-venv/
+.venv/
 ENV/
 
 # IDE
-.idea/
 .vscode/
-*.swp
-*.swo
 
 # Logs
 *.log
