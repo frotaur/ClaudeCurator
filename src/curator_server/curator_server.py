@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class CuratorServer:
-    def __init__(self, system_prompt, github_token, anthropic_api_key, github_secret, repo_owner, repo_name):
+    def __init__(self, system_prompt, github_token, anthropic_api_key, github_secret, repo_owner, repo_name, log_dir=None, print_log=False):
         self.auth_headers = {"Authorization": f"token {github_token}"}
         self.client = Anthropic(api_key=anthropic_api_key)
         self.github_secret = github_secret
@@ -16,19 +16,28 @@ class CuratorServer:
 
         self.repo_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}"
 
+        if log_dir:
+            self.log_path = Path(log_dir) / 'curator_server_logs.txt'
+            if not self.log_path.parent.exists():
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            self.log_path=None
+        
+        self.print_log = print_log
+
     def verify_signature(self,payload, signature):
         """Verify GitHub webhook signature"""
         if not signature:
-            print("No signature provided")
+            self.log("No signature provided")
             return False
         
         try:
-            print(f"Received signature: {signature}")
-            print(f"Secret being used: {self.github_secret[:5]}...")  # Print just first few chars to check
+            self.log(f"Received signature: {signature}")
+            self.log(f"Secret being used: {self.github_secret[:5]}...")  # self.log just first few chars to check
 
             sha_name, signature = signature.split('=')
             if sha_name != 'sha256':
-                print(f"Invalid hash algorithm: {sha_name}")
+                self.log(f"Invalid hash algorithm: {sha_name}")
                 return False
 
 
@@ -37,22 +46,22 @@ class CuratorServer:
             mac = hmac.new(secret, msg=payload, digestmod=hashlib.sha256)
             calculated_signature = mac.hexdigest()
             
-            print(f"Calculated signature: {calculated_signature[:5]}...")  # Print just first few chars
+            self.log(f"Calculated signature: {calculated_signature[:5]}...")  # self.log just first few chars
             
             result = hmac.compare_digest(calculated_signature, signature)
             if not result:
-                print("Signature verification failed - signatures don't match")
+                self.log("Signature verification failed - signatures don't match")
             return result
     
         except Exception as e:
-            print(f"Error verifying signature: {e}")
+            self.log(f"Error verifying signature: {e}")
             return False
 
     def _check_mergeable(self, pr_number):
         """Check if a pull request is mergeable"""
         pr_detail_url = self.repo_url+f"/pulls/{pr_number}"
         
-        print(f"Checking if PR #{pr_number} is auto-mergeable...")
+        self.log(f"Checking if PR #{pr_number} is auto-mergeable...")
         time.sleep(1)
         pr_response = requests.get(pr_detail_url, headers=self.auth_headers)
         if pr_response.status_code == 200:
@@ -60,11 +69,11 @@ class CuratorServer:
             mergeable = pr_data.get('mergeable')
             mergeable_state = pr_data.get('mergeable_state')
             
-            print(f"PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
+            self.log(f"PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
             
             # GitHub might not have computed mergeable status yet (null)
             if mergeable is None and mergeable_state == 'unknown':
-                print("Mergeable status not computed yet, waiting 5 seconds and trying again...")
+                self.log("Mergeable status not computed yet, waiting 5 seconds and trying again...")
                 time.sleep(5)
                 
                 # Try again
@@ -73,7 +82,7 @@ class CuratorServer:
                     pr_data = pr_response.json()
                     mergeable = pr_data.get('mergeable')
                     mergeable_state = pr_data.get('mergeable_state')
-                    print(f"After retry - PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
+                    self.log(f"After retry - PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
         
         return mergeable
     
@@ -91,7 +100,7 @@ Please resolve the merge conflicts and reopen your pull request.
 
 Note: This automatic rejection happens before content review. Once conflicts are resolved, feel free to reopen the PR for a full review.
 """
-            print(f"Automatically rejecting PR #{pr_number} due to merge conflicts")
+            self.log(f"Automatically rejecting PR #{pr_number} due to merge conflicts")
             self.reject_pull_request(pr_number, rejection_message)
             return
         
@@ -106,7 +115,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
             large_files_str = "\n".join([f"- {f} ({format_file_size(file_sizes[f])})" for f in large_files])
             rejection_message = f"This pull request has been automatically rejected because it contains files larger than 2MB.\nLarge files:\n{large_files_str}"
 
-            print(f"Automatically rejecting PR #{pr_number} due to large files: {large_files}")
+            self.log(f"Automatically rejecting PR #{pr_number} due to large files: {large_files}")
             self.reject_pull_request(pr_number, rejection_message)
             return
         
@@ -158,7 +167,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
         try:
             claude_response = json.loads("{"+response.content[0].text)
         except json.JSONDecodeError:
-            print("❌ Error decoding Claude's response - falling back to raw text")
+            self.log("❌ Error decoding Claude's response - falling back to raw text")
             claude_response = {'decision':False,'explanation': f'Curator failed to return parsable JSON, auto-rejected : {response.content[0].text}'}
 
         if(log):
@@ -177,7 +186,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
                 log_file.write(f"Sending to Claude for review...\n")
                 log_file.write(f"Claude's response:\n{claude_response}\n")
 
-        print(f"Claude's response: {claude_response}")
+        self.log(f"Claude's response: {claude_response}")
         # Parse Claude's decision
         decision = claude_response.get('decision', False)
         explanation = claude_response.get('explanation', 'No explanation provided.')
@@ -198,8 +207,8 @@ Note: This automatic rejection happens before content review. Once conflicts are
         }
         response = requests.post(url, headers=self.auth_headers, json=data)
         if response.status_code != 201:
-            print(f"❌ Failed to add rejection comment to PR #{pr_number}. Status code: {response.status_code}")
-            print(f"Error message: {response.text}")
+            self.log(f"❌ Failed to add rejection comment to PR #{pr_number}. Status code: {response.status_code}")
+            self.log(f"Error message: {response.text}")
         
         # Close the PR
         close_url = self.repo_url+f"/pulls/{pr_number}"
@@ -207,10 +216,10 @@ Note: This automatic rejection happens before content review. Once conflicts are
         close_response = requests.patch(close_url, headers=self.auth_headers, json=close_data)
 
         if close_response.status_code != 200:
-            print(f"❌ Failed to close PR #{pr_number}. Status code: {close_response.status_code}")
-            print(f"Error message: {close_response.text}")
+            self.log(f"❌ Failed to close PR #{pr_number}. Status code: {close_response.status_code}")
+            self.log(f"Error message: {close_response.text}")
         else:
-            print(f"✅ Successfully closed PR #{pr_number}")
+            self.log(f"✅ Successfully closed PR #{pr_number}")
 
     def approve_pull_request(self, pr_number, explanation, commit_title=None, commit_message=None):
         """Approve the pull request"""
@@ -230,22 +239,22 @@ Note: This automatic rejection happens before content review. Once conflicts are
 
         is_self_approval_error = False
         if approve_response.status_code == 200:
-            print(f"✅ Successfully approved PR #{pr_number}")
+            self.log(f"✅ Successfully approved PR #{pr_number}")
         else:
-            print(f"❌ Failed to approve PR #{pr_number}. Status code: {approve_response.status_code}")
-            print(f"Error message: {approve_response.text}")
+            self.log(f"❌ Failed to approve PR #{pr_number}. Status code: {approve_response.status_code}")
+            self.log(f"Error message: {approve_response.text}")
             
             # Check if it's the "can't approve your own PR" error
             try:
                 error_data = approve_response.json()
                 if "errors" in error_data and any("Can not approve your own pull request" in str(error) for error in error_data["errors"]):
-                    print("ℹ️ This is your own PR - skipping approval but proceeding with merge")
+                    self.log("ℹ️ This is your own PR - skipping approval but proceeding with merge")
                     is_self_approval_error = True
             except:
                 pass
                 
         if not is_self_approval_error and approve_response.status_code != 200:
-            print("⚠️ Approval failed with an unexpected error - merge may also fail")
+            self.log("⚠️ Approval failed with an unexpected error - merge may also fail")
         
         
         # Merge the PR
@@ -255,14 +264,14 @@ Note: This automatic rejection happens before content review. Once conflicts are
             "commit_message": commit_message or f"Automatically merged PR #{pr_number} by AI Curator",
             "merge_method": "merge"
         }
-        print(f"Attempting to merge PR #{pr_number}...")
+        self.log(f"Attempting to merge PR #{pr_number}...")
         merge_response = requests.put(merge_url, headers=self.auth_headers, json=merge_data)
 
         if merge_response.status_code == 200:
-            print(f"✅ Successfully merged PR #{pr_number}")
+            self.log(f"✅ Successfully merged PR #{pr_number}")
         else:
-            print(f"❌ Failed to merge PR #{pr_number}. Status code: {merge_response.status_code}")
-            print(f"Error message: {merge_response.text}")
+            self.log(f"❌ Failed to merge PR #{pr_number}. Status code: {merge_response.status_code}")
+            self.log(f"Error message: {merge_response.text}")
     
     def get_pr_changes(self,pr_number, only_diffs=True):
         """
@@ -348,7 +357,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
             try:
                 return response.content.decode('utf-8')
             except Exception as e:
-                print(f"⚠️ WARNING: Failed to decode guidelines.md - {e}")
+                self.log(f"⚠️ WARNING: Failed to decode guidelines.md - {e}")
                 return guideline_error
         else:
             return guideline_error
@@ -401,12 +410,12 @@ Note: This automatic rejection happens before content review. Once conflicts are
     def handle_event(self, event, payload):
         """Handle a GitHub event"""
         if event == 'ping':
-            print('RECEIVED PING EVENT - Webhook configured successfully!')
+            self.log('RECEIVED PING EVENT - Webhook configured successfully!')
             return jsonify({"status": "Webhook configured successfully"}), 200
         
         # Handle PR creation event
         if event == 'pull_request' and payload['action'] == 'opened':
-            print('RECEIVED PR OPENED EVENT')
+            self.log('RECEIVED PR OPENED EVENT')
             pr_number = payload['pull_request']['number']
             pr_title = payload['pull_request']['title']
             pr_body = payload['pull_request']['body'] or ""
@@ -417,7 +426,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
 
             return jsonify({"status": "Processing PR"}), 200
         if event == 'pull_request' and payload['action'] == 'reopened':
-            print('RECEIVED PR REOPENED EVENT')
+            self.log('RECEIVED PR REOPENED EVENT')
             pr_number = payload['pull_request']['number']
             pr_title = payload['pull_request']['title']
             pr_body = payload['pull_request']['body'] or ""
@@ -428,9 +437,17 @@ Note: This automatic rejection happens before content review. Once conflicts are
 
             return jsonify({"status": "Processing reopened PR"}), 200
             
-        print(f"Received event: {event} with action: {payload.get('action', 'unknown')}")
-        print("This event is not handled by the curator.")
+        self.log(f"Received event: {event} with action: {payload.get('action', 'unknown')}")
+        self.log("This event is not handled by the curator.")
         
         return jsonify({"status": "Event ignored"}), 200
 
-
+    def log(self, message):
+        """Log a message to the log file if logging is enabled"""
+        if self.log_path:
+            with self.log_path.open("a") as f:
+                f.write("------------------------------------------------------------------------\n")
+                f.write(f"{message}\n")
+    
+        if self.print_log:
+            print(message)
