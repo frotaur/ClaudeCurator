@@ -62,7 +62,7 @@ class CuratorServer:
         pr_detail_url = self.repo_url+f"/pulls/{pr_number}"
         
         self.log(f"Checking if PR #{pr_number} is auto-mergeable...")
-        time.sleep(1)
+        time.sleep(2)
         pr_response = requests.get(pr_detail_url, headers=self.auth_headers)
         if pr_response.status_code == 200:
             pr_data = pr_response.json()
@@ -71,8 +71,9 @@ class CuratorServer:
             
             self.log(f"PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
             
-            # GitHub might not have computed mergeable status yet (null)
-            if mergeable is None and mergeable_state == 'unknown':
+            # GitHub might not have computed mergeable status yet (null), try thrice
+            count=0
+            while(mergeable is None and mergeable_state == 'unknown' and count<3):
                 self.log("Mergeable status not computed yet, waiting 5 seconds and trying again...")
                 time.sleep(5)
                 
@@ -83,7 +84,8 @@ class CuratorServer:
                     mergeable = pr_data.get('mergeable')
                     mergeable_state = pr_data.get('mergeable_state')
                     self.log(f"After retry - PR #{pr_number} mergeable status: {mergeable}, state: {mergeable_state}")
-        
+                count+=1
+
         return mergeable
     
     def process_pull_request(self, pr_number, pr_title, pr_body, pr_user, log=False, is_reopened=False):
@@ -170,23 +172,21 @@ Note: This automatic rejection happens before content review. Once conflicts are
             self.log("❌ Error decoding Claude's response - falling back to raw text")
             claude_response = {'decision':False,'explanation': f'Curator failed to return parsable JSON, auto-rejected : {response.content[0].text}'}
 
-        if(log):
-            filepath = Path("logs.txt")
-            with filepath.open("a") as log_file:
-                log_file.write(f"\n\n Processing PR #{pr_number}:\n")
-                user_prompt = ""
-                for prompt in user_prompt_content:
-                    if prompt['type'] == 'text':
-                        user_prompt += prompt['text'] + "\n\n"
-                    elif prompt['type'] == 'image':
-                        user_prompt += f"Image file: {prompt['source']['url']}\n\n"
-                    else:
-                        user_prompt += "Unknown content type" + "\n\n"
-                log_file.write(user_prompt + "\n\n")
-                log_file.write(f"Sending to Claude for review...\n")
-                log_file.write(f"Claude's response:\n{claude_response}\n")
 
-        self.log(f"Claude's response: {claude_response}")
+        ## Logging....
+        self.log(f"\n\n Processing PR #{pr_number}:\n")
+        user_prompt = ""
+        for prompt in user_prompt_content:
+            if prompt['type'] == 'text':
+                user_prompt += prompt['text'] + "\n\n"
+            elif prompt['type'] == 'image':
+                user_prompt += f"Image file: {prompt['source']['url']}\n\n"
+            else:
+                user_prompt += "Unknown content type" + "\n\n"
+        self.log(user_prompt + "\n\n")
+        self.log(f"Sending to Claude for review...\n")
+        self.log(f"Claude's response:\n{claude_response}")
+
         # Parse Claude's decision
         decision = claude_response.get('decision', False)
         explanation = claude_response.get('explanation', 'No explanation provided.')
@@ -299,17 +299,29 @@ Note: This automatic rejection happens before content review. Once conflicts are
         for file in files_changed:
             filename = file['filename']
             status = file['status']  # added, modified, removed
-            
+            self.log(f"Processing file: {filename} with status: {status}")
+            self.log(f"File raw URL: {file.get('raw_url','unknown')}")
+            self.log(f"File content url: {file['contents_url']}")
             # Get file content
-            file_url = file['raw_url']
-            file_response = requests.get(file_url, headers=self.auth_headers)
-
+            file_content_url = file['contents_url']
+            file_content_response = requests.get(file_content_url, headers=self.auth_headers)
+            
+            download_url = None
+            if file_content_response.status_code == 200:
+                # get download url, and download the file
+                download_url = file_content_response.json()['download_url']
+                file_response = requests.get(download_url, headers=self.auth_headers)
+            else:
+                self.log(f"❌ Failed to fetch file content for {filename}. Status code: {file_content_response.status_code}")
+                changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
+                continue
+                
             if file_response.status_code == 200:
                 # Store file size for size checks
                 content_type = file_response.headers.get('Content-Type', '')
                 content_length = file_response.headers.get('content-length')
                 if content_length:
-                        file_size = int(content_length)
+                    file_size = int(content_length)
                 else:
                     file_size = len(file_response.content)
                     
@@ -324,15 +336,16 @@ Note: This automatic rejection happens before content review. Once conflicts are
                 if content_type.startswith('image/'):
                     size_str = format_file_size(file_size)
                     changes_text.append(f"File: {filename} ({status})\n[Image file - {size_str}]")
-                    changes_images[filename] = file['raw_url']  # Store raw URL for images
+                    changes_images[filename] = download_url  # Store raw URL for images
                 else:
                     # Try to decode as text, too many MIME types to check
                     try:
-                        content = file_response.content.decode('utf-8')
+                        
                         if('patch' in file):
                             # If the file has a patch, include the changes
                             change_string = f"File: {filename} ({status})\n Changes made : ```\n{file.get('patch','')}\n```"
                             if(not only_diffs):
+                                content = file_response.content.decode('utf-8')
                                 change_string += f"\n\nFull content:\n```{content}```"
                         changes_text.append(change_string)
                     except UnicodeDecodeError:
@@ -343,6 +356,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
                         # Handle any other errors
                         changes_text.append(f"File: {filename} ({status})\nError reading file: {str(e)}")
             else:
+                self.log(f"❌ Failed to fetch content for file: {filename}. Status code: {file_response.status_code}")
                 changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
         
         return "\n\n".join(changes_text), changes_images, file_sizes
@@ -351,7 +365,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
         """Fetch the current repository guidelines"""
         url = f"https://raw.githubusercontent.com/{self.repo_owner}/{self.repo_name}/main/guidelines.md"
 
-        guideline_error = "Unable to fetch guidelines. They might have been deleted, or corrupted. Operate as if they are empty."
+        guideline_error = "Unable to fetch guidelines. They might have been deleted, or corrupted. Operate as if they are empty. Mention in the PR that the guidelines.md file should be created urgently."
         response = requests.get(url, headers=self.auth_headers)
         if response.status_code == 200:
             try:
