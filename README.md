@@ -1,6 +1,6 @@
 # Claude Curator
 
-A simple repository curator, that queries Claude to decide whether to merge or not incoming PR's, given a 'guidelines.md' file.
+A simple repository curator, that queries Claude to decide whether to merge or not incoming PR's, given a 'guidelines.md' file. If you are looking to interact with a curated repository, you should [go here](https://github.com/frotaur/AICurated).
 
 This has obviously much less capability than other AI agent that can contribute/maintain repositories, and uses nothing fancy like MCP and agentic capabilities. The difference (and main idea) with this project, is that the 'guidelines.md' file is itself contained in the repository that is being maintained. As such, it may generate interesting situations, as you can gaslight the curator to change its own guidelines... My hope is that it can produce some interesting interactions with people trying to hack/protect the guidelines. As such, the limited context the curator has to work with to accept/refuse PRs can be considered a feature!
 
