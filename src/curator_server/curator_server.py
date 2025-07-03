@@ -338,23 +338,27 @@ Note: This automatic rejection happens before content review. Once conflicts are
                     changes_text.append(f"File: {filename} ({status})\n[Image file - {size_str}]")
                     changes_images[filename] = download_url  # Store raw URL for images
                 else:
-                    # Try to decode as text, too many MIME types to check
-                    try:
-                        
-                        if('patch' in file):
+                    # Too many MIME types to check just assume its text if it has a patch
+                    if('patch' in file):
+                        try:
                             # If the file has a patch, include the changes
                             change_string = f"File: {filename} ({status})\n Changes made : ```\n{file.get('patch','')}\n```"
                             if(not only_diffs):
                                 content = file_response.content.decode('utf-8')
                                 change_string += f"\n\nFull content:\n```{content}```"
-                        changes_text.append(change_string)
-                    except UnicodeDecodeError:
-                        # If decoding fails, it's probably binary even if not on our list
+                            changes_text.append(change_string)
+                        except UnicodeDecodeError:
+                            # If decoding fails, it's probably binary even if not on our list
+                            size_str = format_file_size(file_size)
+                            changes_text.append(f"File: {filename} ({status})\n[Binary file - {size_str} - content not displayable]")
+                        except Exception as e:
+                            # Handle any other errors
+                            self.log(f"❌ Error reading file with 'patch' {filename}: {str(e)}")
+                            changes_text.append(f"File: {filename} ({status})\n Can't read content due to an error: {str(e)}")
+                    else:
+                        # If no patch, just mention the file name and size
                         size_str = format_file_size(file_size)
-                        changes_text.append(f"File: {filename} ({status})\n[Binary file - {size_str} - content not displayed]")
-                    except Exception as e:
-                        # Handle any other errors
-                        changes_text.append(f"File: {filename} ({status})\nError reading file: {str(e)}")
+                        changes_text.append(f"File: {filename} ({status})\n[File {size_str} - content not displayable (it is not an image or text file)]")
             else:
                 self.log(f"❌ Failed to fetch content for file: {filename}. Status code: {file_response.status_code}")
                 changes_text.append(f"File: {filename} ({status})\nUnable to fetch content.")
@@ -416,8 +420,10 @@ Note: This automatic rejection happens before content review. Once conflicts are
             return "No previous comments found."
         
         formatted_comments = []
-        for comment in comments:
+        for comment in comments[:-1]: # Exclude the last comment which is the reopening comment
             formatted_comments.append(f"Comment by {comment['user']['login']} at {comment['created_at']}:\n{comment['body']}")
+        
+        formatted_comments.append(f"Last REOPENING comment (important!) by {comments[-1]['user']['login']} at {comments[-1]['created_at']}:\n{comments[-1]['body']}")
         
         return "\n\n".join(formatted_comments)
 
