@@ -123,7 +123,8 @@ Note: This automatic rejection happens before content review. Once conflicts are
         
         # If all files are under the size limit, proceed with Claude review
         guidelines = self.get_repository_guidelines()
-        
+        self.log(f"\n\n Processing PR #{pr_number}:\n")
+
         # Build user prompt for Claude - contains the specific PR details
         base_prompt = f"""Repository Guidelines, contained in guidelines.md :
     "{guidelines}"
@@ -153,6 +154,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
         if images_prompt:
             user_prompt_content.extend(images_prompt)
         user_prompt_content.append({"type": "text", "text": changes_prompt})
+        self.log(f"Sending to Claude for review...\n")
         # Send to Claude for review using system and user prompts
         response = self.client.messages.create(
             model="claude-3-7-sonnet-20250219",
@@ -173,8 +175,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
             claude_response = {'decision':False,'explanation': f'Curator failed to return parsable JSON, auto-rejected : {response.content[0].text}'}
 
 
-        ## Logging....
-        self.log(f"\n\n Processing PR #{pr_number}:\n")
+
         user_prompt = ""
         for prompt in user_prompt_content:
             if prompt['type'] == 'text':
@@ -182,9 +183,10 @@ Note: This automatic rejection happens before content review. Once conflicts are
             elif prompt['type'] == 'image':
                 user_prompt += f"Image file: {prompt['source']['url']}\n\n"
             else:
-                user_prompt += "Unknown content type" + "\n\n"
-        self.log(user_prompt + "\n\n")
-        self.log(f"Sending to Claude for review...\n")
+                user_prompt += "Unknown content type\n\n"
+
+        self.log(f"User prompt :\n\n {user_prompt} \n\n ")
+
         self.log(f"Claude's response:\n{claude_response}")
 
         # Parse Claude's decision
@@ -465,7 +467,7 @@ Note: This automatic rejection happens before content review. Once conflicts are
     def log(self, message):
         """Log a message to the log file if logging is enabled"""
         if self.log_path:
-            with self.log_path.open("a") as f:
+            with self.log_path.open("a", encoding="utf-8") as f:
                 f.write("------------------------------------------------------------------------\n")
                 f.write(f"{message}\n")
     

@@ -2,24 +2,29 @@
 
 A simple repository curator, that queries Claude to decide whether to merge or not incoming PR's, given a 'guidelines.md' file. If you are looking to interact with a curated repository, you should [go here](https://github.com/frotaur/AICurated). For a more in depth explanation, [check out this post on my website](https://vassi.life/projects/claudecurator)
 
-This has obviously much less capability than other AI agent that can contribute/maintain repositories, and uses nothing fancy like MCP and agentic capabilities. The difference (and main idea) with this project, is that the 'guidelines.md' file is itself contained in the repository that is being maintained. As such, it may generate interesting situations, as you can gaslight the curator to change its own guidelines... My hope is that it can produce some interesting interactions with people trying to hack/protect the guidelines. As such, the limited context the curator has to work with to accept/refuse PRs can be considered a feature!
+This has clearly less capability than other AI agent that can contribute/maintain repositories, and uses nothing fancy like MCP and agentic capabilities. The difference (and main idea) with this project, is that the 'guidelines.md' file is itself contained in the repository that is being maintained. As such, it may generate interesting situations, as you can gaslight the curator to change its own guidelines... My hope is that it can produce some interesting interactions with people trying to hack/protect the guidelines. As such, the limited context the curator has to work with to accept/refuse PRs can be considered a feature!
 
 ## Quick Start
 
 1. **Install dependencies:**
-Using pip, for example :
+Using pip :
 ```bash
 pip install -e .
 ```
 
-This will install the package, and install two scripts `run-server` and `deploy-webhook`.
+Using uv : 
+```bash
+uv sync
+```
+
+This will install the package, and install three scripts `deploy-webhook`, `run-gunicron` and `run-server`.
 
 2. **Set up environment variables:**
 For a guided setup of the necessary environment variables, run :
 ```bash
 deploy-webhook
 ```
-This will prompt you to give the require variables, and then setup the github webhook to allow the curator to run.
+This will prompt you to give the require variables, and then setup the github webhook to allow the curator to run. Note that the provided `GITHUB_TOKEN` will be used by the curator to merge/reject pull requests, and the messages it writes will appear as coming from the account who owns `GITHUB_TOKEN`. For the webhook to be automatically created, 'GITHUB_TOKEN' must have webhook creation privilegies. Otherwise, see the **Deploy webhook** section. 
 
 You can also do this manually. First, create a `.env` file with:
 
@@ -29,7 +34,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 REPO_NAME=curated_repository_name
 REPO_OWNER=username_of_owner_of_curated_repository
 GITHUB_SECRET=your_webhook_secret
-WEBHOOK_URL=public_url_where_the_server_is_exposed
+WEBHOOK_URL=public_url_where_the_server_is_exposed  # Optional, only if you want to create it with 'deploy-webhook'
 PORT=port_where_curator_server_will_run
 ```
 
